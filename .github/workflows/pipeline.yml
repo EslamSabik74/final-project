@@ -9,7 +9,7 @@ on:
 env:
   AWS_REGION: us-east-1
   EKS_CLUSTER: solar-system-eks
-  ECR_REPOSITORY: solar-system-app
+  ECR_REPOSITORY: final-project
   NAMESPACE: production
   STAGING_NS: staging
   REPLICAS: 2
@@ -94,7 +94,7 @@ jobs:
         aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER
         kubectl create namespace $STAGING_NS --dry-run=client -o yaml | kubectl apply -f -
         
-        # تعديل الملفات
+        
         sed -i "s|\${NAMESPACE}|$STAGING_NS|g" kubernetes/staging/*.yaml
         sed -i "s|\${REPLICAS}|1|g" kubernetes/staging/deployment.yaml
         sed -i "s|\${K8S_IMAGE}|${{ env.ECR_REGISTRY }}/$ECR_REPOSITORY:${{ github.sha }}|g" kubernetes/staging/deployment.yaml
