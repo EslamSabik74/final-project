@@ -10,11 +10,14 @@ env:
   AWS_REGION: us-east-1
   EKS_CLUSTER: solar-system-eks
   ECR_REPOSITORY: solar-system-app
+  NAMESPACE: production
+  STAGING_NS: staging
+  REPLICAS: 2
 
 jobs:
-  # ===== Continuous Integration =====
+  # ===== 1. CI - Continuous Integration =====
   ci:
-    name:  CI - Continuous Integration
+    name: CI - Tests & Code Scanning
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     
@@ -22,28 +25,26 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
     
-    - name: Unit Testing
-      run: |
-        echo "Running unit tests..."
-        npm ci
-        npm test
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Run Unit Tests
+      run: npm test
     
     - name: Dependency Scan
       run: npm audit
     
-    - name: Code Scanning
+    - name: CodeQL Analysis
       uses: github/codeql-action/analyze@v3
       with:
         languages: javascript
     
     - name: Build Artifact
-      run: |
-        echo "Building artifact..."
-        tar -czf app.tar.gz .
+      run: tar -czf app.tar.gz .
 
-  # ===== Build & Push =====
+  # ===== 2. Build & Push to ECR =====
   build:
-    name: Build Docker Image
+    name: Build & Push to ECR
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     
@@ -68,11 +69,14 @@ jobs:
       run: |
         docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
         docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        echo "ECR_REGISTRY=$ECR_REGISTRY" >> $GITHUB_ENV
+        echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
 
-  # ===== Deploy Staging  =====
+  # ===== 3. Deploy to Staging =====
   deploy-staging:
     name: Deploy to Staging
     runs-on: ubuntu-latest
+    needs: ci
     if: github.event_name == 'pull_request'
     
     steps:
@@ -88,10 +92,17 @@ jobs:
     - name: Deploy to Staging
       run: |
         aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER
+        kubectl create namespace $STAGING_NS --dry-run=client -o yaml | kubectl apply -f -
+        
+        # تعديل الملفات
+        sed -i "s|\${NAMESPACE}|$STAGING_NS|g" kubernetes/staging/*.yaml
+        sed -i "s|\${REPLICAS}|1|g" kubernetes/staging/deployment.yaml
+        sed -i "s|\${K8S_IMAGE}|${{ env.ECR_REGISTRY }}/$ECR_REPOSITORY:${{ github.sha }}|g" kubernetes/staging/deployment.yaml
+        
         kubectl apply -f kubernetes/staging/
-        kubectl rollout status deployment/solar-system -n staging
+        kubectl rollout status deployment/solar-system -n $STAGING_NS --timeout=3m
 
-  # ===== Deploy Production =====
+  # ===== 4. Deploy to Production =====
   deploy-prod:
     name: Deploy to Production
     runs-on: ubuntu-latest
@@ -111,5 +122,51 @@ jobs:
     - name: Deploy to Production
       run: |
         aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER
+        kubectl create namespace $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
+        
+       
+        kubectl create secret generic mongo-db-creds \
+          --namespace $NAMESPACE \
+          --from-literal=MONGO_URI=mongodb://admin:password@mongodb-service:27017/solarsystem \
+          --dry-run=client -o yaml | kubectl apply -f -
+        
+        
+        sed -i "s|\${NAMESPACE}|$NAMESPACE|g" kubernetes/production/*.yaml
+        sed -i "s|\${REPLICAS}|$REPLICAS|g" kubernetes/production/deployment.yaml
+        sed -i "s|\${K8S_IMAGE}|${{ env.ECR_REGISTRY }}/$ECR_REPOSITORY:${{ github.sha }}|g" kubernetes/production/deployment.yaml
+        
         kubectl apply -f kubernetes/production/
-        kubectl rollout status deployment/solar-system -n production
+        kubectl rollout status deployment/solar-system -n $NAMESPACE --timeout=5m
+
+  # ===== 5. Smoke Test =====
+  smoke-test:
+    name: Smoke Test
+    runs-on: ubuntu-latest
+    needs: [deploy-staging, deploy-prod]
+    if: always()
+    
+    steps:
+    - name: Configure AWS
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+    
+    - name: Test Staging
+      if: needs.deploy-staging.result == 'success'
+      run: |
+        aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER
+        URL=$(kubectl get svc solar-system-app-service -n staging -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+        echo "Testing Staging: $URL"
+        curl -f http://$URL || exit 1
+        echo "Staging OK"
+    
+    - name: Test Production
+      if: needs.deploy-prod.result == 'success'
+      run: |
+        aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER
+        URL=$(kubectl get svc solar-system-app-service -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+        echo "Testing Production: $URL"
+        curl -f http://$URL || exit 1
+        echo "Production OK"
