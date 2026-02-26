@@ -3,7 +3,7 @@ kind: Service
 metadata:
   labels:
     app: solar-system
-  name: solar-system
+  name: solar-system-app-service   
   namespace: ${NAMESPACE}
 spec:
   ports:
@@ -12,4 +12,4 @@ spec:
     targetPort: 3000
   selector:
     app: solar-system 
-  type: NodePort
+  type: LoadBalancer   

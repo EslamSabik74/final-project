@@ -2,19 +2,19 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   labels:
-    app: solar-system
+    app:solar-system-app
   name: solar-system
   namespace: ${NAMESPACE}
 spec:
   replicas: ${REPLICAS}
   selector:
     matchLabels:
-      app: solar-system
+      app: solar-system-app
   strategy: {}
   template:
     metadata:
       labels:
-        app: solar-system
+        app: solar-system-app
     spec:
       containers:
       - image: ${K8S_IMAGE}
