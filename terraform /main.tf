@@ -1,22 +1,28 @@
-#----------------
+data "aws_availability_zones" "available" {}
+
+locals {
+  azs = slice(data.aws_availability_zones.available.names, 0, 2)
+}
+
+# -------------------------------------------------------------------
 # 1. VPC
-#----------------
+# -------------------------------------------------------------------
 module "vpc" {
   source = "terraform-aws-modules/vpc/aws"
   version = "~> 5.0"
 
   name = "${var.cluster_name}-vpc"
-  cidr = var.vpc_cidr
+  cidr = "10.0.0.0/16"
 
-  azs = var.availability_zones
+  azs = local.azs
 
   private_subnets  = ["10.0.1.0/24", "10.0.2.0/24"]
   public_subnets   = ["10.0.101.0/24", "10.0.102.0/24"]
   database_subnets = ["10.0.151.0/24", "10.0.152.0/24"]
 
-  enable_nat_gateway = true
-  single_nat_gateway = true
-  enable_vpn_gateway = false
+  enable_nat_gateway   = true
+  single_nat_gateway   = true
+  enable_vpn_gateway   = false
   enable_dns_hostnames = true
   enable_dns_support   = true
 
@@ -26,21 +32,22 @@ module "vpc" {
 
   public_subnet_tags = {
     "kubernetes.io/role/elb" = "1"
-    Name = "${var.cluster_name}-public"
+    Name                     = "${var.cluster_name}-public"
   }
 
   private_subnet_tags = {
     "kubernetes.io/role/internal-elb" = "1"
-    Name = "${var.cluster_name}-private"
+    Name                              = "${var.cluster_name}-private"
   }
 
   database_subnet_tags = {
     Name = "${var.cluster_name}-database"
   }
 }
-#-----------------------
+
+# -------------------------------------------------------------------
 # 2. EKS Cluster
-#-----------------------
+# -------------------------------------------------------------------
 module "eks" {
   source = "terraform-aws-modules/eks/aws"
   version = "~> 20.31"
@@ -51,7 +58,7 @@ module "eks" {
   vpc_id     = module.vpc.vpc_id
   subnet_ids = module.vpc.private_subnets
 
-  cluster_endpoint_public_access = true
+  cluster_endpoint_public_access           = true
   enable_cluster_creator_admin_permissions = true
 
   node_security_group_additional_rules = {
@@ -67,12 +74,10 @@ module "eks" {
 
   eks_managed_node_groups = {
     main = {
-      desired_size = 2
+      desired_size = 1
       min_size     = 1
-      max_size     = 3
-
-      instance_types = [var.instance_type]
-
+      max_size     = 1
+      instance_types = ["t3.micro"]
       tags = merge(var.tags, {
         Name = "${var.cluster_name}-node"
       })
@@ -82,9 +87,9 @@ module "eks" {
   tags = var.tags
 }
 
-#----------------------------
-# 3. RDS MySQL (Multi-AZ)
-#----------------------------
+# -------------------------------------------------------------------
+# 3. RDS MySQL
+# -------------------------------------------------------------------
 resource "random_password" "db_password" {
   length  = 16
   special = false
@@ -126,34 +131,35 @@ resource "aws_db_instance" "mysql" {
 
   engine         = "mysql"
   engine_version = "8.0"
-  instance_class = "db.t3.medium"
+  instance_class = "db.t3.micro"
 
   allocated_storage     = 20
-  max_allocated_storage = 100
-  storage_type         = "gp3"
-  storage_encrypted    = true
+  max_allocated_storage = 20
+  storage_type          = "gp2"
+  storage_encrypted     = false
 
   db_name  = var.db_name
   username = var.db_username
   password = random_password.db_password.result
 
-  multi_az = true
+  multi_az = false
+
+  backup_retention_period = 0
+  backup_window           = null
+  maintenance_window      = null
 
   db_subnet_group_name   = aws_db_subnet_group.main.name
   vpc_security_group_ids = [aws_security_group.rds.id]
-
-  backup_retention_period = 7
-  backup_window          = "03:00-04:00"
-  maintenance_window     = "sun:04:00-sun:05:00"
 
   deletion_protection = false
   skip_final_snapshot = true
 
   tags = var.tags
 }
-#-----------------------------
-# 4. ALB + WAF
-#-----------------------------
+
+# -------------------------------------------------------------------
+# 4. ALB
+# -------------------------------------------------------------------
 resource "aws_security_group" "alb" {
   name        = "${var.cluster_name}-alb-sg"
   description = "Security Group for ALB"
@@ -224,6 +230,9 @@ resource "aws_lb_listener" "http" {
   }
 }
 
+# -------------------------------------------------------------------
+# 5. WAF
+# -------------------------------------------------------------------
 resource "aws_wafv2_web_acl" "main" {
   name        = "${var.cluster_name}-waf"
   description = "WAF for Solar System App"
@@ -243,9 +252,11 @@ resource "aws_wafv2_web_acl" "main" {
     }
 
     statement {
-      sql_injection_match_statement {
+      sqli_match_statement {
         field_to_match {
-          body {}
+          body {
+            oversize_handling = "CONTINUE"
+          }
         }
         text_transformation {
           priority = 1
@@ -276,7 +287,9 @@ resource "aws_wafv2_web_acl" "main" {
     statement {
       xss_match_statement {
         field_to_match {
-          body {}
+          body {
+            oversize_handling = "CONTINUE"
+          }
         }
         text_transformation {
           priority = 1
