@@ -8,7 +8,7 @@ env:
   AWS_REGION: us-east-1
   EKS_CLUSTER: solar-system-cluster   
   DOCKER_IMAGE: eslam1000/solar-system
-  NAMESPACE: production
+  NAMESPACE: development
   REPLICAS: 2
 
 jobs:
