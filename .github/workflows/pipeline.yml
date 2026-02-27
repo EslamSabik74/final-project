@@ -81,12 +81,12 @@ jobs:
     - name: Deploy to EKS
       run: |
        
-        sed -i "s|TAG|${{ env.TAG }}|g" kubernetes/production/deployment.yaml
-        sed -i "s|\${NAMESPACE}|${{ env.NAMESPACE }}|g" kubernetes/production/*.yaml
-        sed -i "s|\${REPLICAS}|${{ env.REPLICAS }}|g" kubernetes/production/deployment.yaml
+        sed -i "s|TAG|${{ env.TAG }}|g" kubernetes/development/deployment.yaml
+        sed -i "s|\${NAMESPACE}|${{ env.NAMESPACE }}|g" kubernetes/development/*.yaml
+        sed -i "s|\${REPLICAS}|${{ env.REPLICAS }}|g" kubernetes/development/deployment.yaml
         
     
-        kubectl apply -f kubernetes/production
+        kubectl apply -f kubernetes/development
         
         
         kubectl rollout status deployment/solar-system -n ${{ env.NAMESPACE }} --timeout=5m
