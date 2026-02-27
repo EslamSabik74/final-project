@@ -1,8 +1,6 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  labels:
-    app: solar-system
   name: solar-system
   namespace: ${NAMESPACE}
 spec:
@@ -16,13 +14,28 @@ spec:
         app: solar-system
     spec:
       containers:
-      - image: ${K8S_IMAGE}
-        imagePullPolicy: Always
-        name: solar-system
+      - name: solar-system
+        image: eslamsabik/solar-system:TAG
         ports:
         - containerPort: 3000
-          name: http
-          protocol: TCP
-        envFrom:
-        - secretRef:
-            name: mongo-db-creds
+        env:
+        - name: DB_HOST
+          valueFrom:
+            secretKeyRef:
+              name: db-secret
+              key: host
+        - name: DB_USER
+          valueFrom:
+            secretKeyRef:
+              name: db-secret
+              key: username
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: db-secret
+              key: password
+        - name: DB_NAME
+          valueFrom:
+            secretKeyRef:
+              name: db-secret
+              key: database

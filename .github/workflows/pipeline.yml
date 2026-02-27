@@ -1,172 +1,97 @@
-name: CI/CD Pipeline
+name: CI/CD Pipeline (Docker Hub + EKS)
 
 on:
-  pull_request:
-    branches: [ main ]
   push:
     branches: [ main ]
 
 env:
   AWS_REGION: us-east-1
-  EKS_CLUSTER: solar-system-eks
-  ECR_REPOSITORY: final-project
+  EKS_CLUSTER: solar-system-cluster  
+  DOCKER_IMAGE: eslamsabik/solar-system
   NAMESPACE: production
-  STAGING_NS: staging
   REPLICAS: 2
 
 jobs:
-  # ===== 1. CI - Continuous Integration =====
-  ci:
-    name: CI - Tests & Code Scanning
+  build-and-deploy:
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    
+
     steps:
-    - name: Checkout
+    - name: Checkout Code
       uses: actions/checkout@v4
-    
-    - name: Install dependencies
-      run: npm ci
-    
-    - name: Run Unit Tests
-      run: npm test
-    
-    - name: Dependency Scan
-      run: npm audit
-    
-    - name: CodeQL Analysis
-      uses: github/codeql-action/analyze@v3
-      with:
-        languages: javascript
-    
-    - name: Build Artifact
-      run: tar -czf app.tar.gz .
 
-  # ===== 2. Build & Push to ECR =====
-  build:
-    name: Build & Push to ECR
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Configure AWS
-      uses: aws-actions/configure-aws-credentials@v4
+    # ---------- Configure AWS Credentials ----------
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
       with:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
-    
-    - name: Login to ECR
-      id: ecr
-      uses: aws-actions/amazon-ecr-login@v2
-    
-    - name: Build & Push
-      env:
-        ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
-        IMAGE_TAG: ${{ github.sha }}
-      run: |
-        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-        echo "ECR_REGISTRY=$ECR_REGISTRY" >> $GITHUB_ENV
-        echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
 
-  # ===== 3. Deploy to Staging =====
-  deploy-staging:
-    name: Deploy to Staging
-    runs-on: ubuntu-latest
-    needs: ci
-    if: github.event_name == 'pull_request'
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Configure AWS
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
-    
-    - name: Deploy to Staging
+    # ---------- Wait for EKS Cluster ----------
+    - name: Wait for EKS cluster to be ready
       run: |
-        aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER
-        kubectl create namespace $STAGING_NS --dry-run=client -o yaml | kubectl apply -f -
-        
-        
-        sed -i "s|\${NAMESPACE}|$STAGING_NS|g" kubernetes/staging/*.yaml
-        sed -i "s|\${REPLICAS}|1|g" kubernetes/staging/deployment.yaml
-        sed -i "s|\${K8S_IMAGE}|${{ env.ECR_REGISTRY }}/$ECR_REPOSITORY:${{ github.sha }}|g" kubernetes/staging/deployment.yaml
-        
-        kubectl apply -f kubernetes/staging/
-        kubectl rollout status deployment/solar-system -n $STAGING_NS --timeout=3m
+        echo " Waiting for EKS cluster ${{ env.EKS_CLUSTER }} to be active..."
+        aws eks wait cluster-active --name ${{ env.EKS_CLUSTER }} --region ${{ env.AWS_REGION }}
+        echo " EKS cluster is ready!"
 
-  # ===== 4. Deploy to Production =====
-  deploy-prod:
-    name: Deploy to Production
-    runs-on: ubuntu-latest
-    needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Configure AWS
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
-    
-    - name: Deploy to Production
+    # ---------- Update kubeconfig ----------
+    - name: Update kubeconfig
       run: |
-        aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER
-        kubectl create namespace $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
-        
-       
-        kubectl create secret generic mongo-db-creds \
-          --namespace $NAMESPACE \
-          --from-literal=MONGO_URI=mongodb://admin:password@mongodb-service:27017/solarsystem \
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER }}
+        kubectl get nodes  # Test connection
+
+    # ---------- Docker Hub Login ----------
+    - name: Login to Docker Hub
+      run: |
+        echo "${{ secrets.DOCKERHUB_TOKEN }}" | \
+        docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+
+    # ---------- Build & Push Image ----------
+    - name: Build & Push Docker Image
+      run: |
+        TAG=${{ github.sha }}-${{ github.run_number }}
+        docker build -t $DOCKER_IMAGE:$TAG .
+        docker push $DOCKER_IMAGE:$TAG
+        echo "TAG=$TAG" >> $GITHUB_ENV
+
+    # ---------- Get DB Password from Secrets Manager ----------
+    - name: Get database password
+      id: get_secret
+      run: |
+        DB_PASSWORD=$(aws secretsmanager get-secret-value \
+          --secret-id solar-system-cluster-db-password \
+          --region ${{ env.AWS_REGION }} \
+          --query SecretString --output text)
+        echo "DB_PASSWORD=$DB_PASSWORD" >> $GITHUB_ENV
+
+    # ---------- Create Kubernetes Secret for DB ----------
+    - name: Create database secret
+      run: |
+        kubectl create secret generic db-secret \
+          --namespace ${{ env.NAMESPACE }} \
+          --from-literal=username=admin \
+          --from-literal=password=${{ env.DB_PASSWORD }} \
+          --from-literal=database=solarsystemdb \
           --dry-run=client -o yaml | kubectl apply -f -
-        
-        
-        sed -i "s|\${NAMESPACE}|$NAMESPACE|g" kubernetes/production/*.yaml
-        sed -i "s|\${REPLICAS}|$REPLICAS|g" kubernetes/production/deployment.yaml
-        sed -i "s|\${K8S_IMAGE}|${{ env.ECR_REGISTRY }}/$ECR_REPOSITORY:${{ github.sha }}|g" kubernetes/production/deployment.yaml
-        
-        kubectl apply -f kubernetes/production/
-        kubectl rollout status deployment/solar-system -n $NAMESPACE --timeout=5m
 
-  # ===== 5. Smoke Test =====
-  smoke-test:
-    name: Smoke Test
-    runs-on: ubuntu-latest
-    needs: [deploy-staging, deploy-prod]
-    if: always()
-    
-    steps:
-    - name: Configure AWS
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
-    
-    - name: Test Staging
-      if: needs.deploy-staging.result == 'success'
+    # ---------- Deploy to EKS ----------
+    - name: Deploy to EKS
       run: |
-        aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER
-        URL=$(kubectl get svc solar-system-app-service -n staging -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-        echo "Testing Staging: $URL"
-        curl -f http://$URL || exit 1
-        echo "Staging OK"
+       
+        sed -i "s|TAG|${{ env.TAG }}|g" kubernetes/production/deployment.yaml
+        sed -i "s|\${NAMESPACE}|${{ env.NAMESPACE }}|g" kubernetes/production/*.yaml
+        sed -i "s|\${REPLICAS}|${{ env.REPLICAS }}|g" kubernetes/production/deployment.yaml
+        
     
-    - name: Test Production
-      if: needs.deploy-prod.result == 'success'
+        kubectl apply -f kubernetes/production
+        
+        
+        kubectl rollout status deployment/solar-system -n ${{ env.NAMESPACE }} --timeout=5m
+
+    # ---------- Get Application URL ----------
+    - name: Get LoadBalancer URL
       run: |
-        aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER
-        URL=$(kubectl get svc solar-system-app-service -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-        echo "Testing Production: $URL"
-        curl -f http://$URL || exit 1
-        echo "Production OK"
+        echo " Application URL:"
+        kubectl get svc -n ${{ env.NAMESPACE }} solar-system \
+          -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+        echo ""
