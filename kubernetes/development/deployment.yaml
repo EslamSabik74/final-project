@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
       - name: solar-system
-        image: eslamsabik/solar-system:TAG
+        image: eslam1000/solar-system:TAG
         ports:
         - containerPort: 3000
         env:
