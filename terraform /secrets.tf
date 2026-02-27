@@ -3,8 +3,9 @@ resource "random_password" "db_password" {
   special = false
 }
 
+
 resource "aws_secretsmanager_secret" "db_password" {
-  name = "${var.cluster_name}-db-password"
+  name = "${var.cluster_name}-db-password-${formatdate("YYYYMMDDhhmmss", timestamp())}"
   tags = var.tags
 }
 
