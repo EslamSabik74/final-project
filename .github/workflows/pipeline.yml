@@ -53,6 +53,9 @@ jobs:
         docker build -t $DOCKER_IMAGE:$TAG .
         docker push $DOCKER_IMAGE:$TAG
         echo "TAG=$TAG" >> $GITHUB_ENV
+    - name: Create namespace if not exists
+      run: |
+        kubectl create namespace ${{ env.NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -    
 
     # ---------- Get DB Password from Secrets Manager ----------
     - name: Get database password
